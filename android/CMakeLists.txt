@@ -47,6 +47,8 @@ set_target_properties(VisionCamera PROPERTIES IMPORTED_LOCATION
   "${CMAKE_CURRENT_SOURCE_DIR}/react-native-vision-camera/android/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/${ANDROID_ABI}/libVisionCamera.so"
 )
 
+target_compile_definitions(react-native-vision-jsi-processor-onnx PUBLIC HAVE_OPENCL)
+
 target_link_libraries(
         react-native-vision-jsi-processor-onnx
         android
@@ -55,5 +57,6 @@ target_link_libraries(
         VisionCamera
         log
         OpenCV::opencv_java4
+        neuralnetworks
 )
 
