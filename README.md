@@ -1,6 +1,6 @@
 # react-native-vision-jsi-processor-onnx
 
-onnx package
+A VisionCamera Frame Processor Plugin using JSI to run ONNX/TFLite models with OpenCV DNN on Android.
 
 ## Installation
 
@@ -8,21 +8,28 @@ onnx package
 npm install react-native-vision-jsi-processor-onnx
 ```
 
-## Usage
+### Android
 
+Ensure the following dependencies are added to your `android/app/build.gradle` file:
 
-```js
-import { multiply } from 'react-native-vision-jsi-processor-onnx';
-
-// ...
-
-const result = multiply(3, 7);
+```groovy
+android {
+    packagingOptions {
+        pickFirst 'META-INF/*'
+    }
+}
 ```
 
+Also, ensure that OpenCV and other native dependencies are correctly integrated into your project.
 
-## Contributing
+## Usage
 
-See the [contributing guide](CONTRIBUTING.md) to learn how to contribute to the repository and the development workflow.
+- Register the plugin in your native code to expose the JSI function `processOnnxFrame`.
+- Use the install function to install it first.
+- Use the `processOnnxFrame` inside a VisionCamera frame processor to run inference on camera frames.
+- Supports both ONNX and TFLite models.
+
+
 
 ## License
 

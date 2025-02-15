@@ -6,7 +6,6 @@
 #include "../../../node_modules/react-native-vision-camera/ios/Frame Processor/FrameHostObject.h"
 #endif
 
-//extern "C" void registerFrameProcessorPlugins(facebook::jsi::Runtime &runtime);
 extern "C" void registerOnnxFrameProcessor(facebook::jsi::Runtime &runtime);
 
 namespace visionjsiprocessor {
@@ -35,7 +34,6 @@ namespace visionjsiprocessor {
           basePlugin);
       runtime.global().setProperty(runtime, "frameProcessor", jsiFunc);
 
-      //registerFrameProcessorPlugins(runtime);
       registerOnnxFrameProcessor(runtime);
   }
 }

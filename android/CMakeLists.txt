@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD 20)
 find_package(ReactAndroid REQUIRED CONFIG)
 find_package(fbjni REQUIRED CONFIG)
 find_package(OpenCV REQUIRED COMPONENTS OpenCV::opencv_java4)
-#find_package(react-native-vision-camera REQUIRED CONFIG)
 
 
 file(GLOB FRAMEPROCESSOR_SOURCES "react-native-vision-camera/android/src/main/cpp/frameprocessors/*.cpp")
@@ -19,7 +18,7 @@ list(REMOVE_ITEM FASTOPENCVCPP_SOURCES "react-native-fast-opencv/cpp/onnxFramePr
 add_library(react-native-vision-jsi-processor-onnx SHARED
     ../node_modules/react-native/ReactCommon/jsi/jsi/jsi.cpp
     ../cpp/react-native-vision-jsi-processor.cpp
-    #../cpp/onnxFrameProcessorPlugin.cpp
+
     ../cpp/onnxFrameProcessor.cpp
     ../cpp/cpp-addapter.cpp
     ${FRAMEPROCESSOR_SOURCES}
