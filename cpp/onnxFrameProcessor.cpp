@@ -91,8 +91,7 @@ extern "C" void registerOnnxFrameProcessor(jsi::Runtime &runtime) {
     cv::resize(image, resizedImg, cv::Size(newUnpadWidth, newUnpadHeight), cv::INTER_LINEAR);
     cv::Mat paddedImg;
     cv::copyMakeBorder(resizedImg, paddedImg, dh, dh, dw, dw, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
-    float scaley = static_cast<float>(origHeight) / static_cast<float>(length);
-    float scalex = static_cast<float>(origWidth) / static_cast<float>(length);
+
     cv::Mat blob;
     cv::dnn::blobFromImage(paddedImg, blob, 1/255.0, cv::Size(length, length), cv::Scalar(), true, false);
     __android_log_print(ANDROID_LOG_DEBUG, "VisionJSIProcessor", "Input blob created, size: %dx%d", blob.size[2], blob.size[3]);
@@ -133,7 +132,7 @@ extern "C" void registerOnnxFrameProcessor(jsi::Runtime &runtime) {
     if (!accelerationSet) {
       __android_log_print(ANDROID_LOG_DEBUG, "VisionJSIProcessor", "No hardware acceleration available. Falling back to CPU.");
       net.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
-      net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+      net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU_FP16);
     }
 
     __android_log_print(ANDROID_LOG_DEBUG, "VisionJSIProcessor", "Starting forward pass");
@@ -187,11 +186,7 @@ extern "C" void registerOnnxFrameProcessor(jsi::Runtime &runtime) {
           float y = data[1];
           float w = data[2];
           float h = data[3];
-          int left = static_cast<int>((x - 0.5 * w) * scalex);
-          int top = static_cast<int>((y - 0.5 * h) * scaley);
-          int boxW = static_cast<int>(w * scalex);
-          int boxH = static_cast<int>(h * scaley);
-          boxes.push_back(cv::Rect(left, top, boxW, boxH));
+          boxes.push_back(cv::Rect(x, y, w, h));
         }
       } else {
         float confidence = data[4];
@@ -208,11 +203,7 @@ extern "C" void registerOnnxFrameProcessor(jsi::Runtime &runtime) {
             float y = data[1];
             float w = data[2];
             float h = data[3];
-            int left = static_cast<int>((x - 0.5 * w) * scalex);
-            int top = static_cast<int>((y - 0.5 * h) * scaley);
-            int right = static_cast<int>((x + 0.5 * w) * scalex);
-            int bottom = static_cast<int>((y + 0.5 * h) * scaley);
-            boxes.push_back(cv::Rect(left, top, right, bottom));
+            boxes.push_back(cv::Rect(x, y, w, h));
           }
         }
       }
@@ -234,8 +225,6 @@ extern "C" void registerOnnxFrameProcessor(jsi::Runtime &runtime) {
       boxArray.setValueAtIndex(runtime, 2, jsi::Value(boxes[idx].width));
       boxArray.setValueAtIndex(runtime, 3, jsi::Value(boxes[idx].height));
       detection.setProperty(runtime, "box", boxArray);
-      detection.setProperty(runtime, "scalex", jsi::Value(scalex));
-      detection.setProperty(runtime, "scaley", jsi::Value(scaley));
       detections.setValueAtIndex(runtime, i, detection);
     }
     __android_log_print(ANDROID_LOG_DEBUG, "VisionJSIProcessor", "Returning %zu detections", indices.size());
