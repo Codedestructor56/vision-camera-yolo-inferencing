@@ -1,3 +1,5 @@
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 cmake_minimum_required(VERSION 3.4.1)
 project(VisionJSIProcessorONNX)
 
@@ -57,6 +59,40 @@ target_link_libraries(
         VisionCamera
         log
         OpenCV::opencv_java4
-        neuralnetworks
 )
+
+if(ANDROID_NATIVE_API_LEVEL GREATER_EQUAL 29)
+    target_link_libraries(
+            react-native-vision-jsi-processor-onnx
+            android
+            ReactAndroid::jsi
+            fbjni::fbjni
+            VisionCamera
+            log
+            OpenCV::opencv_java4
+            neuralnetworks
+    )
+else()
+    target_link_libraries(
+            react-native-vision-jsi-processor-onnx
+            android
+            ReactAndroid::jsi
+            fbjni::fbjni
+            VisionCamera
+            log
+            OpenCV::opencv_java4
+    )
+endif()
+
+if(ReactAndroid_VERSION_MINOR GREATER_EQUAL 76)
+    target_link_libraries(
+        ${PACKAGE_NAME}
+        ReactAndroid::reactnative
+    )
+else()
+    target_link_libraries(
+        ${PACKAGE_NAME}
+        ReactAndroid::reactnativejni
+    )
+endif()
 
