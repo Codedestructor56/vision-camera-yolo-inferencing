@@ -25,15 +25,6 @@ inline std::string getClassName(int id, const std::vector<std::string>& classes)
   return (id >= 0 && id < static_cast<int>(classes.size())) ? classes[id] : "unknown";
 }
 
-/*
- * OnnxFrameProcessor
- *
- * This class encapsulates all state related to the frame processor,
- * including the loaded model (as a cv::dnn::Net), the chosen device/backends,
- * and any acceleration settings. It is designed so that the model is loaded
- * only once (if the same model is used), and device checks (like OpenCL or NNAPI)
- * are only performed during the initial load.
- */
 class OnnxFrameProcessor {
 public:
   OnnxFrameProcessor();

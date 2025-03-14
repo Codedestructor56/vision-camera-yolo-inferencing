@@ -139,6 +139,7 @@ std::vector<std::string> OnnxFrameProcessor::runInference(const cv::Mat &blob,
                                                           float modelScoreThreshold,
                                                           float modelNMSThreshold) {
   net.setInput(blob);
+  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Input blob set");
   std::vector<cv::Mat> outputs;
   double t0 = cv::getTickCount();
   net.forward(outputs, net.getUnconnectedOutLayersNames());
