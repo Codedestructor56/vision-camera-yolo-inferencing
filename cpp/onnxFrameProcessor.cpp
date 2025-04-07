@@ -179,8 +179,25 @@ std::vector<std::string> OnnxFrameProcessor::runInference(const cv::Mat &blob,
       if (maxClassScore > modelScoreThreshold) {
         confidences.push_back(maxClassScore);
         class_ids.push_back(class_id_point.x);
-        float x = data[0], y = data[1], w = data[2], h = data[3];
-        boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
+        //float x = data[0], y = data[1], w = data[2], h = data[3];
+        //boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
+
+        float cx = data[0];
+        float cy = data[1];
+        float w = data[2];
+        float h = data[3];
+
+        int tl_x = static_cast<int>(std::round(cx - w / 2.0f));
+        int tl_y = static_cast<int>(std::round(cy - h / 2.0f));
+
+        int box_w = static_cast<int>(std::round(w));
+        int box_h = static_cast<int>(std::round(h));
+
+        tl_x = std::max(0, tl_x);
+        tl_y = std::max(0, tl_y);
+        box_w = std::max(0, std::min(box_w, 320 - tl_x));
+        box_h = std::max(0, std::min(box_h, 320 - tl_y));
+        boxes.push_back(cv::Rect(cv::Point(tl_x, tl_y), cv::Size(box_w, box_h)));
       }
     } else {
       float confidence = data[4];
@@ -193,8 +210,24 @@ std::vector<std::string> OnnxFrameProcessor::runInference(const cv::Mat &blob,
         if (max_class_score > modelScoreThreshold) {
           confidences.push_back(confidence);
           class_ids.push_back(class_id_point.x);
-          float x = data[0], y = data[1], w = data[2], h = data[3];
-          boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
+          //float x = data[0], y = data[1], w = data[2], h = data[3];
+          //boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
+          float cx = data[0];
+          float cy = data[1];
+          float w = data[2];
+          float h = data[3];
+
+          int tl_x = static_cast<int>(std::round(cx - w / 2.0f));
+          int tl_y = static_cast<int>(std::round(cy - h / 2.0f));
+
+          int box_w = static_cast<int>(std::round(w));
+          int box_h = static_cast<int>(std::round(h));
+
+          tl_x = std::max(0, tl_x);
+          tl_y = std::max(0, tl_y);
+          box_w = std::max(0, std::min(box_w, 320 - tl_x));
+          box_h = std::max(0, std::min(box_h, 320 - tl_y));
+          boxes.push_back(cv::Rect(cv::Point(tl_x, tl_y), cv::Size(box_w, box_h)));
         }
       }
     }
