@@ -35,6 +35,8 @@ add_library(react-native-vision-jsi-processor-onnx SHARED
     ../cpp/react-native-vision-jsi-processor.cpp
     ../cpp/onnxFrameProcessor.cpp
     ../cpp/cpp-addapter.cpp
+    ../cpp/Inference.cpp
+    ../cpp/Inference.h
     ${FRAMEPROCESSOR_SOURCES}
     ${JSIH_SOURCES}
     ${JSICPP_SOURCES}
@@ -57,6 +59,17 @@ include_directories(
 )
 
 target_compile_definitions(react-native-vision-jsi-processor-onnx PUBLIC HAVE_OPENCL)
+
+add_library(onnxruntime SHARED IMPORTED)
+set_target_properties(onnxruntime PROPERTIES
+  IMPORTED_LOCATION
+    "${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime/${ANDROID_ABI}/libonnxruntime.so"
+)
+
+# then just link against it:
+target_link_libraries(react-native-vision-jsi-processor-onnx
+      onnxruntime
+)
 
 if(ANDROID_NATIVE_API_LEVEL GREATER_EQUAL 29)
     target_link_libraries(
