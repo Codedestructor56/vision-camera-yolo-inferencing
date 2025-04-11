@@ -1,25 +1,17 @@
 #include "onnxFrameProcessor.h"
 #include "TypedArray.h"
 #include <opencv2/imgproc.hpp>
-#include <opencv2/dnn.hpp>
 #include <sstream>
+#include <iomanip>
 #include <cmath>
-
-#ifdef HAVE_OPENCL
-#include <opencv2/core/ocl.hpp>
-#endif
-
-#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 29)
-#include <android/NeuralNetworks.h>
-#endif
+#include <chrono>
 
 using namespace facebook;
 using namespace jsi;
 
-
 OnnxFrameProcessor::OnnxFrameProcessor()
-    : modelLoaded(false), accelerationSet(false) {
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Processor created");
+    : modelLoaded(false) {
+  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Processor created (using ONNX Runtime via DCSP_CORE)");
 }
 
 OnnxFrameProcessor::~OnnxFrameProcessor() {
@@ -27,229 +19,134 @@ OnnxFrameProcessor::~OnnxFrameProcessor() {
 }
 
 void OnnxFrameProcessor::clearState() {
-  net = cv::dnn::Net();
+  dcspCore.reset();
   currentModelPath.clear();
   currentModelType.clear();
+  currentModelInputSize.clear();
   modelLoaded = false;
-  accelerationSet = false;
+  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "State cleared");
 }
 
-void OnnxFrameProcessor::configureDevice(const std::string &modelType) {
-  accelerationSet = false;
-#ifdef HAVE_OPENCL
-  if (cv::ocl::haveOpenCL()) {
-    cv::ocl::Device device = cv::ocl::Device::getDefault();
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "OpenCL available. Device: %s", device.name().c_str());
-    net.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
-    net.setPreferableTarget(cv::dnn::DNN_TARGET_OPENCL);
-    accelerationSet = true;
-  }
-#endif
-
-#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 29)
-  if (!accelerationSet && modelType == "tflite") {
-    uint32_t deviceCount = 0;
-    int ret = ANeuralNetworks_getDeviceCount(&deviceCount);
-    if (ret == ANEURALNETWORKS_NO_ERROR && deviceCount > 0) {
-      __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "NNAPI available with %u devices", deviceCount);
-      net.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
-      net.setPreferableTarget(cv::dnn::DNN_TARGET_NPU);
-      accelerationSet = true;
-    } else {
-      __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "No NNAPI devices found (ret=%d, count=%u)", ret, deviceCount);
-    }
-  }
-#else
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Android API < 29, NNAPI query not available");
-#endif
-
-  if (!accelerationSet) {
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "No hardware acceleration available. Falling back to CPU.");
-    net.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
-    net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU_FP16);
-  }
-}
-
-void OnnxFrameProcessor::loadModel(const std::string &modelPath, const std::string &modelType) {
-  if (modelLoaded && currentModelPath == modelPath && currentModelType == modelType) {
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Model already loaded");
+void OnnxFrameProcessor::loadModel(const std::string &modelPath, const std::string &modelType, int inputWidth, int inputHeight) {
+  if (modelLoaded && currentModelPath == modelPath && currentModelType == modelType &&
+      currentModelInputSize.size() == 2 && currentModelInputSize[0] == inputHeight && currentModelInputSize[1] == inputWidth) {
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Model %s (%dx%d) already loaded", modelPath.c_str(), inputWidth, inputHeight);
     return;
   }
+
+  clearState();
+
   currentModelPath = modelPath;
   currentModelType = modelType;
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Loading model from: %s", modelPath.c_str());
+  currentModelInputSize = {inputHeight, inputWidth};
 
-  if (modelType == "onnx") {
-    net = cv::dnn::readNetFromONNX(modelPath);
-    if (net.empty()) {
-      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Failed to load ONNX model");
-      throw std::runtime_error("Failed to load ONNX model");
-    }
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "ONNX model loaded successfully");
-  } else if (modelType == "tflite") {
-    net = cv::dnn::readNetFromTFLite(modelPath);
-    if (net.empty()) {
-      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Failed to load TFLite model");
-      throw std::runtime_error("Failed to load TFLite model");
-    }
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "TFLite model loaded successfully");
-  } else {
-    __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Invalid model type: %s", modelType.c_str());
-    throw std::runtime_error("Invalid model type, expected 'tflite' or 'onnx'");
+  __android_log_print(ANDROID_LOG_INFO, "OnnxFrameProcessor", "Loading ONNX model from: %s with input size %dx%d", modelPath.c_str(), inputWidth, inputHeight);
+
+  if (modelType != "onnx") {
+      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Invalid model type for DCSP_CORE integration: %s. Only 'onnx' is supported.", modelType.c_str());
+      throw std::runtime_error("Invalid model type for DCSP_CORE, expected 'onnx'");
   }
-  configureDevice(modelType);
-  modelLoaded = true;
+
+  try {
+    dcspCore = std::make_unique<DCSP_CORE>();
+
+    DCSP_INIT_PARAM params;
+    params.ModelPath = modelPath;
+    params.ModelType = YOLO_ORIGIN_V8;
+    params.imgSize = currentModelInputSize;
+
+    params.RectConfidenceThreshold = 0.5;
+    params.iouThreshold = 0.5;
+
+    params.CudaEnable = false;
+
+    params.IntraOpNumThreads = 2;
+    params.LogSeverityLevel = 3;
+
+    char* createResult = dcspCore->CreateSession(params);
+    if (createResult != RET_OK) {
+        std::string errorMsg = "Failed to create ONNX Runtime session: ";
+        errorMsg += createResult;
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "%s", errorMsg.c_str());
+        dcspCore.reset();
+        throw std::runtime_error(errorMsg);
+    }
+
+    modelLoaded = true;
+    __android_log_print(ANDROID_LOG_INFO, "OnnxFrameProcessor", "ONNX Runtime session created successfully for %s", modelPath.c_str());
+
+  } catch (const std::exception &e) {
+    __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Exception during model loading: %s", e.what());
+    clearState();
+    throw;
+  } catch (...) {
+    __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Unknown exception during model loading");
+    clearState();
+    throw std::runtime_error("Unknown error during model loading");
+  }
 }
 
 std::vector<std::string> OnnxFrameProcessor::processFrame(const cv::Mat &image,
                                                           const std::vector<std::string> &classes,
                                                           float modelConfidenceThreshold,
-                                                          float modelScoreThreshold,
-                                                          float modelNMSThreshold) {
-  if (!modelLoaded) {
-    __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Model not loaded");
-    throw std::runtime_error("Model not loaded");
-  }
-
-  int origHeight = image.rows;
-  int origWidth = image.cols;
-  int length = std::max(origWidth, origHeight);
-  float ratio = std::min(length / float(origWidth), length / float(origHeight));
-  int newUnpadWidth = static_cast<int>(std::round(origWidth * ratio));
-  int newUnpadHeight = static_cast<int>(std::round(origHeight * ratio));
-  int dw = static_cast<int>(std::ceil((length - newUnpadWidth) / 2.0));
-  int dh = static_cast<int>(std::ceil((length - newUnpadHeight) / 2.0));
-
-  cv::Mat resizedImg;
-  cv::resize(image, resizedImg, cv::Size(newUnpadWidth, newUnpadHeight), 0, 0, cv::INTER_LINEAR);
-
-  cv::Mat paddedImg;
-  cv::copyMakeBorder(resizedImg, paddedImg, dh, dh, dw, dw, cv::BORDER_CONSTANT, cv::Scalar(114,114,114));
-
-  cv::Mat blob;
-  cv::dnn::blobFromImage(paddedImg, blob, 1/255.0, cv::Size(length, length), cv::Scalar(), true, false);
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Input blob created, size: %dx%d", blob.size[2], blob.size[3]);
-
-  return runInference(blob, classes, modelConfidenceThreshold, modelScoreThreshold, modelNMSThreshold);
-}
-
-std::vector<std::string> OnnxFrameProcessor::runInference(const cv::Mat &blob,
-                                                          const std::vector<std::string> &classes,
-                                                          float modelConfidenceThreshold,
-                                                          float modelScoreThreshold,
-                                                          float modelNMSThreshold) {
-  net.setInput(blob);
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Input blob set");
-  std::vector<cv::Mat> outputs;
-  double t0 = cv::getTickCount();
-  net.forward(outputs, net.getUnconnectedOutLayersNames());
-  double t1 = cv::getTickCount();
-  double inferenceTime = (t1 - t0) * 1000 / cv::getTickFrequency();
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Forward pass completed in %.2f ms", inferenceTime);
-
-  if (outputs.empty()) {
-    __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "No output from network");
-    throw std::runtime_error("Empty network output");
-  }
-
-  int rows_out = outputs[0].size[1];
-  int dimensions = outputs[0].size[2];
-  bool yolov8 = false;
-  if (dimensions > rows_out) {
-    rows_out = outputs[0].size[2];
-    dimensions = outputs[0].size[1];
-    outputs[0] = outputs[0].reshape(1, dimensions);
-    cv::transpose(outputs[0], outputs[0]);
-    yolov8 = true;
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Reshaped output for yolov8 configuration");
-  }
-
-  float* data = reinterpret_cast<float*>(outputs[0].data);
-  std::vector<int> class_ids;
-  std::vector<float> confidences;
-  std::vector<cv::Rect> boxes;
-
-  for (int i = 0; i < rows_out; ++i) {
-    if (yolov8) {
-      float* classes_scores = data + 4;
-      cv::Mat scores(1, static_cast<int>(classes.size()), CV_32FC1, classes_scores);
-      cv::Point class_id_point;
-      double maxClassScore;
-      cv::minMaxLoc(scores, 0, &maxClassScore, 0, &class_id_point);
-      if (maxClassScore > modelScoreThreshold) {
-        confidences.push_back(maxClassScore);
-        class_ids.push_back(class_id_point.x);
-        //float x = data[0], y = data[1], w = data[2], h = data[3];
-        //boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
-
-        float cx = data[0];
-        float cy = data[1];
-        float w = data[2];
-        float h = data[3];
-
-        int tl_x = static_cast<int>(std::round(cx - w / 2.0f));
-        int tl_y = static_cast<int>(std::round(cy - h / 2.0f));
-
-        int box_w = static_cast<int>(std::round(w));
-        int box_h = static_cast<int>(std::round(h));
-
-        tl_x = std::max(0, tl_x);
-        tl_y = std::max(0, tl_y);
-        box_w = std::max(0, std::min(box_w, 320 - tl_x));
-        box_h = std::max(0, std::min(box_h, 320 - tl_y));
-        boxes.push_back(cv::Rect(cv::Point(tl_x, tl_y), cv::Size(box_w, box_h)));
-      }
-    } else {
-      float confidence = data[4];
-      if (confidence >= modelConfidenceThreshold) {
-        float* classes_scores = data + 5;
-        cv::Mat scores(1, static_cast<int>(classes.size()), CV_32FC1, classes_scores);
-        cv::Point class_id_point;
-        double max_class_score;
-        cv::minMaxLoc(scores, 0, &max_class_score, 0, &class_id_point);
-        if (max_class_score > modelScoreThreshold) {
-          confidences.push_back(confidence);
-          class_ids.push_back(class_id_point.x);
-          //float x = data[0], y = data[1], w = data[2], h = data[3];
-          //boxes.push_back(cv::Rect(cv::Point(x, y), cv::Size(w, h)));
-          float cx = data[0];
-          float cy = data[1];
-          float w = data[2];
-          float h = data[3];
-
-          int tl_x = static_cast<int>(std::round(cx - w / 2.0f));
-          int tl_y = static_cast<int>(std::round(cy - h / 2.0f));
-
-          int box_w = static_cast<int>(std::round(w));
-          int box_h = static_cast<int>(std::round(h));
-
-          tl_x = std::max(0, tl_x);
-          tl_y = std::max(0, tl_y);
-          box_w = std::max(0, std::min(box_w, 320 - tl_x));
-          box_h = std::max(0, std::min(box_h, 320 - tl_y));
-          boxes.push_back(cv::Rect(cv::Point(tl_x, tl_y), cv::Size(box_w, box_h)));
-        }
-      }
+                                                          float modelNmsThreshold,
+                                                          float modelScoreThreshold) {
+    if (!modelLoaded || !dcspCore) {
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Model not loaded, cannot process frame.");
+        return {};
     }
-    data += dimensions;
-  }
 
-  std::vector<int> indices;
-  cv::dnn::NMSBoxes(boxes, confidences, modelScoreThreshold, modelNMSThreshold, indices);
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "NMSBoxes reduced detections to %zu", indices.size());
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", 
+        "Processing frame with thresholds - Confidence: %.3f, NMS: %.3f",
+        modelConfidenceThreshold, modelNmsThreshold);
 
-  std::vector<std::string> detections;
-  for (size_t i = 0; i < indices.size(); i++) {
-    int idx = indices[i];
-    std::ostringstream oss;
-    oss << "{ \"class_id\": " << class_ids[idx]
-        << ", \"class_name\": \"" << getClassName(class_ids[idx], classes) << "\""
-        << ", \"confidence\": " << confidences[idx]
-        << ", \"box\": [" << boxes[idx].x << ", " << boxes[idx].y
-        << ", " << boxes[idx].width << ", " << boxes[idx].height << "] }";
-    detections.push_back(oss.str());
-  }
-  return detections;
+    dcspCore->classes = classes;
+
+    modelConfidenceThreshold = std::max(0.0f, std::min(1.0f, modelConfidenceThreshold));
+    modelNmsThreshold = std::max(0.0f, std::min(1.0f, modelNmsThreshold));
+
+    dcspCore->rectConfidenceThreshold = modelConfidenceThreshold;
+    dcspCore->iouThreshold = modelNmsThreshold;
+
+    std::vector<DCSP_RESULT> results;
+    results.reserve(20);
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    cv::Mat mutableImage = image.clone();
+    char* runResult = dcspCore->RunSession(mutableImage, results);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> duration = end - start;
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", 
+        "RunSession completed in %.2f ms, found %zu results.", 
+        duration.count(), results.size());
+
+    if (runResult != RET_OK) {
+        std::string errorMsg = "Error during ONNX Runtime RunSession: ";
+        errorMsg += runResult;
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "%s", errorMsg.c_str());
+        return {};
+    }
+
+    std::vector<std::string> detections;
+    detections.reserve(results.size());
+
+    for (const auto& res : results) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(5);
+        oss << "{ \"class_id\": " << res.classId
+            << ", \"class_name\": \"" << getClassName(res.classId, classes) << "\""
+            << ", \"confidence\": " << res.confidence
+            << ", \"box\": [" << res.box.x << ", " << res.box.y
+            << ", " << res.box.width << ", " << res.box.height << "] }";
+        detections.push_back(oss.str());
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", 
+        "Processing complete. Returning %zu detections", detections.size());
+
+    return detections;
 }
 
 static std::shared_ptr<OnnxFrameProcessor> gProcessor = std::make_shared<OnnxFrameProcessor>();
@@ -259,85 +156,121 @@ void OnnxFrameProcessor::registerOnnxFrameProcessor(jsi::Runtime &runtime) {
                                const jsi::Value &thisArg,
                                const jsi::Value *args,
                                size_t count) -> jsi::Value {
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Starting processOnnxFrame");
-    if (count < 10) {
-      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Expected 10 arguments, received %zu", count);
-      throw jsi::JSError(runtime, "Expected 10 arguments");
+    auto start_time = std::chrono::high_resolution_clock::now();
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "JSI processOnnxFrame called");
+
+    const int expectedArgCount = 12;
+    if (count != expectedArgCount) {
+      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Expected %d arguments, received %zu", expectedArgCount, count);
+      throw jsi::JSError(runtime, "Expected " + std::to_string(expectedArgCount) + " arguments");
     }
 
     double rows = args[0].asNumber();
     double cols = args[1].asNumber();
     double channels = args[2].asNumber();
     jsi::Object input = args[3].asObject(runtime);
-
+    
+    auto inputBuffer = mrousavy::getTypedArray(runtime, std::move(input));
+    auto kind = inputBuffer.getKind(runtime);
+    bool isFloat32 = (kind == mrousavy::TypedArrayKind::Float32Array);
+    
     int type = -1;
-    if (channels == 1) {
-      type = CV_8U;
+    if (channels == 1) { 
+        type = isFloat32 ? CV_32F : CV_8U;
     } else if (channels == 3) {
-      type = CV_8UC3;
+        type = isFloat32 ? CV_32FC3 : CV_8UC3;
     } else if (channels == 4) {
-      type = CV_8UC4;
+        type = isFloat32 ? CV_32FC4 : CV_8UC4;
     } else {
-      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Invalid channel count: %f", channels);
-      throw jsi::JSError(runtime, "Invalid channel count passed to frameBufferToMat!");
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Invalid channel count: %f", channels);
+        throw jsi::JSError(runtime, "Invalid channel count passed to frameBufferToMat!");
     }
 
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Image dimensions: %fx%f, channels: %f", rows, cols, channels);
-    auto inputBuffer = mrousavy::getTypedArray(runtime, std::move(input));
+    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", 
+        "Image dims: %.0fx%.0f, channels: %.0f, data type: %s", 
+        rows, cols, channels, isFloat32 ? "float32" : "uint8");
+
     auto vec = inputBuffer.toVector(runtime);
-    cv::Mat image(rows, cols, type);
-    memcpy(image.data, vec.data(), static_cast<size_t>(rows * cols * channels));
-    if (image.empty()) {
-      __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Image is empty");
-      throw jsi::JSError(runtime, "Empty image");
+    cv::Mat image(static_cast<int>(rows), static_cast<int>(cols), type);
+    
+    size_t expectedSize = image.total() * image.elemSize();
+    if (vec.size() != expectedSize) {
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", 
+            "TypedArray size (%zu) does not match image buffer size (%zu) for %s data", 
+            vec.size(), expectedSize, isFloat32 ? "float32" : "uint8");
+        throw jsi::JSError(runtime, "TypedArray size mismatch");
+    }
+
+    memcpy(image.data, vec.data(), vec.size());
+
+    cv::Mat processImage;
+    if (isFloat32) {
+        image.convertTo(processImage, CV_8UC3, 255.0);
+    } else {
+        processImage = image;
+    }
+
+    if (processImage.empty()) {
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Image is empty after conversion");
+        throw jsi::JSError(runtime, "Empty image");
     }
 
     std::string modelPath = args[4].asString(runtime).utf8(runtime);
-    float modelConfidenceThreshold = args[5].asNumber();
-    float modelScoreThreshold = args[6].asNumber();
-    float modelNMSThreshold = args[7].asNumber();
+    float modelConfidenceThreshold = static_cast<float>(args[5].asNumber());
+    float modelNmsThreshold = static_cast<float>(args[6].asNumber());
+    float modelScoreThreshold = static_cast<float>(args[7].asNumber());
 
-    jsi::Object classesObject = args[8].asObject(runtime);
-    jsi::Value lengthValue = classesObject.getProperty(runtime, "length");
-    if (!lengthValue.isNumber())
-      throw jsi::JSError(runtime, "Class names array must have a numeric length");
-    size_t arrayLength = static_cast<size_t>(lengthValue.asNumber());
-    if (arrayLength == 0)
-      throw jsi::JSError(runtime, "Class names array cannot be empty");
-    jsi::Array classNamesArray = classesObject.asArray(runtime);
+    jsi::Array classNamesArray = args[8].asObject(runtime).asArray(runtime);
+    size_t arrayLength = classNamesArray.length(runtime);
+    if (arrayLength == 0) throw jsi::JSError(runtime, "Class names array cannot be empty");
     std::vector<std::string> classes;
+    classes.reserve(arrayLength);
     for (size_t i = 0; i < arrayLength; i++) {
       jsi::Value val = classNamesArray.getValueAtIndex(runtime, i);
-      if (!val.isString())
-        throw jsi::JSError(runtime, "Class names array must contain only strings");
+      if (!val.isString()) throw jsi::JSError(runtime, "Class names array must contain only strings");
       classes.push_back(val.asString(runtime).utf8(runtime));
     }
+
     std::string modelType = args[9].asString(runtime).utf8(runtime);
+    int inputWidth = static_cast<int>(args[10].asNumber());
+    int inputHeight = static_cast<int>(args[11].asNumber());
 
-    if (!gProcessor->isModelLoaded()) {
-       __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Loading model");
-      gProcessor->loadModel(modelPath, modelType);
+    if (inputWidth <= 0 || inputHeight <= 0) {
+         throw jsi::JSError(runtime, "Invalid model input dimensions provided");
     }
 
-    auto detections = gProcessor->processFrame(image, classes,
-                                               modelConfidenceThreshold,
-                                               modelScoreThreshold,
-                                               modelNMSThreshold);
+    try {
+        gProcessor->loadModel(modelPath, modelType, inputWidth, inputHeight);
 
-    jsi::Array jsiDetections(runtime, detections.size());
-    for (size_t i = 0; i < detections.size(); i++) {
-      jsiDetections.setValueAtIndex(runtime, i,
-          jsi::Value(runtime, jsi::String::createFromUtf8(runtime, detections[i].c_str())));
+        auto detections = gProcessor->processFrame(processImage, classes,
+                                                   modelConfidenceThreshold,
+                                                   modelNmsThreshold,
+                                                   modelScoreThreshold);
+
+        jsi::Array jsiDetections(runtime, detections.size());
+        for (size_t i = 0; i < detections.size(); i++) {
+          jsiDetections.setValueAtIndex(runtime, i,
+              jsi::Value(runtime, jsi::String::createFromUtf8(runtime, detections[i])));
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> total_duration = end_time - start_time;
+        __android_log_print(ANDROID_LOG_INFO, "OnnxFrameProcessor", "JSI processOnnxFrame finished in %.2f ms, returning %zu detections", total_duration.count(), detections.size());
+        return jsiDetections;
+
+    } catch (const std::exception& e) {
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Exception in JSI call: %s", e.what());
+        throw jsi::JSError(runtime, std::string("ONNX Processing Error: ") + e.what());
+    } catch (...) {
+        __android_log_print(ANDROID_LOG_ERROR, "OnnxFrameProcessor", "Unknown exception in JSI call");
+        throw jsi::JSError(runtime, "Unknown ONNX Processing Error");
     }
-
-    __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "Returning %zu detections", detections.size());
-    return jsiDetections;
   };
 
   auto func = jsi::Function::createFromHostFunction(runtime,
                  jsi::PropNameID::forUtf8(runtime, "processOnnxFrame"),
-                 10,
+                 12,
                  onnxProcessorFunc);
   runtime.global().setProperty(runtime, "processOnnxFrame", func);
-  __android_log_print(ANDROID_LOG_DEBUG, "OnnxFrameProcessor", "processOnnxFrame registered");
+  __android_log_print(ANDROID_LOG_INFO, "OnnxFrameProcessor", "JSI function 'processOnnxFrame' (ONNX Runtime backend) registered");
 }
